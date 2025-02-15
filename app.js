@@ -23,6 +23,7 @@ main()
   });
 
 async function main() {
+  console.log("mongo url", MONGO_URL)
   await mongoose.connect(MONGO_URL); // Added recommended options
 }
 
@@ -31,6 +32,7 @@ app.set("views", path.join(__dirname, "views")); // Ensure this path is correct
 
 // Middleware for serving static files
 app.use(express.static(path.join(__dirname, "public")));
+
 app.use(express.urlencoded({ extended: true }));
 app.use(methodOverride("_method"));
 app.engine("ejs", ejsMate);
@@ -45,11 +47,13 @@ app.get(
   "/listings",
   wrapAsync(async (req, res) => {
     const allListings = await Listing.find({});
+    console.log("these are all listings", allListings)
     res.render("listings/index.ejs", { allListings }); // Corrected path for EJS rendering
   })
 );
 
 const validateListing = (req, res, next) => {
+  console.log("validating", req.body)
   let {error} = listingSchema.validate(req.body);
  
   if(error){
