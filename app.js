@@ -10,6 +10,8 @@ const wrapAsync = require("./utils/wrapasync.js");
 const ExpressError = require("./utils/ExpressError.js");
 const {listingSchema, reviewSchema} = require("./schema.js");
 const Review = require("./models/review.js");
+const session = require("express-session");
+const User = require("./models/user.js");
 
 const port = 8080;
 const MONGO_URL = "mongodb://127.0.0.1:27017/wanderlust"; // Use const for MONGO_URL
@@ -38,17 +40,55 @@ app.use(methodOverride("_method"));
 app.engine("ejs", ejsMate);
 app.use(bodyParser.urlencoded({ extended: true }));
 
-app.get("/", (req, res) => {
-  res.send("Hi, I am root");
+app.use(session({
+  secret: "supersecretkey",
+  resave: false,
+  saveUninitialized: false,
+}));
+
+// Middleware to make user info available in all views
+app.use((req, res, next) => {
+  res.locals.currentUser = req.session.userId;
+  next();
 });
 
-// Index route
+const unprotectedRoutes = ["/login", "/signup"];
+app.use((req, res, next) => {
+  if (
+    unprotectedRoutes.includes(req.path) ||
+    req.path.startsWith("/public")
+  ) {
+    return next();
+  }
+  if (!req.session.userId) {
+    return res.redirect("/signup");
+  }
+  next();
+});
+
+app.get("/", (req, res) => {
+  if (!req.session.userId) {
+    return res.redirect("/signup");
+  }
+  res.redirect("/listings");
+});
+
+// Middleware to require login
+function requireLogin(req, res, next) {
+  if (!req.session.userId) {
+    return res.redirect('/login');
+  }
+  next();
+}
+
+// Protect listings routes
 app.get(
   "/listings",
+  requireLogin,
   wrapAsync(async (req, res) => {
     const allListings = await Listing.find({});
     console.log("these are all listings", allListings)
-    res.render("listings/index.ejs", { allListings }); // Corrected path for EJS rendering
+    res.render("listings/index.ejs", { allListings });
   })
 );
 
@@ -76,13 +116,14 @@ const validateReview = (req, res, next) => {
 };
 
 // New route
-app.get("/listings/new", (req, res) => {
+app.get("/listings/new", requireLogin, (req, res) => {
   res.render("listings/new.ejs");
 });
 
 // Show route
 app.get(
   "/listings/:id",
+  requireLogin,
   wrapAsync(async (req, res) => {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -98,23 +139,21 @@ app.get(
 
 // Create route
 app.post(
-  "/listings",validateListing,
+  "/listings",
+  requireLogin,
+  validateListing,
   wrapAsync(async (req, res) => {
-    console.log(req.body); // Log the entire request body
     const listingData = req.body.listing;
-    console.log(listingData); // Log the parsed listing data
-   
     const newListing = new Listing(listingData);
-    
-
     await newListing.save();
-    res.status(201).send("Listing created successfully");
+    res.redirect("/listings"); // Redirect to listings page after creation
   })
 );
 
 // Edit route
 app.get(
   "/listings/:id/edit",
+  requireLogin,
   wrapAsync(async (req, res) => {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -131,6 +170,7 @@ app.get(
 // Update route
 app.put(
   "/listings/:id",
+  requireLogin,
   wrapAsync(async (req, res) => {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -144,6 +184,7 @@ app.put(
 // Delete route
 app.delete(
   "/listings/:id",
+  requireLogin,
   wrapAsync(async (req, res) => {
     const { id } = req.params;
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -159,6 +200,7 @@ app.delete(
 //post route
 app.post(
   "/listings/:id/reviews",
+  requireLogin,
   validateReview,
   wrapAsync(async (req, res) => {
     const listing = await Listing.findById(req.params.id);
@@ -177,15 +219,79 @@ app.post(
 
 //delete review route
 // Delete review route
+// app.delete(
+//   "/listings/:listingId/reviews/:reviewId",
+//   wrapAsync(async (req, res) => {
+//     const { id, reviewId } = req.params;
+//     await Listing.findByIdAndUpdate(id, { $pull: { reviews: reviewId } });
+//     await Review.findByIdAndDelete(reviewId);
+//     res.redirect(`/listings/${id}`);
+//   })
+// );
 app.delete(
   "/listings/:listingId/reviews/:reviewId",
+  requireLogin,
   wrapAsync(async (req, res) => {
-    const { id, reviewId } = req.params;
-    await Listing.findByIdAndUpdate(id, { $pull: { reviews: reviewId } });
+    const { listingId, reviewId } = req.params; // ✅ Corrected
+    await Listing.findByIdAndUpdate(listingId, { $pull: { reviews: reviewId } });
     await Review.findByIdAndDelete(reviewId);
-    res.redirect(`/listings/${id}`);
+    res.redirect(`/listings/${listingId}`);
   })
 );
+
+app.get("/signup", (req, res) => {
+  if (req.session.userId) {
+    return res.redirect("/listings");
+  }
+  res.render("signup.ejs");
+});
+
+app.post("/signup", async (req, res, next) => {
+  try {
+    const { username, email, password } = req.body;
+    const existingUser = await User.findOne({ $or: [{ username }, { email }] });
+    if (existingUser) {
+      return res.status(400).render("signup.ejs", { error: "Username or email already exists." });
+    }
+    const user = new User({ username, email, password });
+    await user.save();
+    req.session.userId = user._id;
+    res.redirect("/listings");
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/login", (req, res) => {
+  if (req.session.userId) {
+    return res.redirect("/listings");
+  }
+  res.render("login.ejs");
+});
+
+app.post("/login", async (req, res, next) => {
+  try {
+    const { username, password } = req.body;
+    const user = await User.findOne({ username });
+    if (!user) {
+      return res.status(400).render("login.ejs", { error: "Invalid username or password." });
+    }
+    const isMatch = await user.comparePassword(password);
+    if (!isMatch) {
+      return res.status(400).render("login.ejs", { error: "Invalid username or password." });
+    }
+    req.session.userId = user._id;
+    res.redirect("/listings");
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/logout", (req, res) => {
+  req.session.destroy(() => {
+    res.redirect("/signup");
+  });
+});
 
 
 app.all("*", (req, res, next) => {
@@ -205,5 +311,10 @@ app.use((err, req, res, next) => {
   
 
 app.listen(port, () => {
-  console.log("Server is listening on port ${port}"); // Corrected typo
+  console.log("Server is listening on port 8080"); // Corrected typo
 });
+//initilaize commands
+//cd majorproject
+//node app.js
+//cd init
+//node index.js
